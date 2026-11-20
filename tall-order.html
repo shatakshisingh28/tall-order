@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Tall Order</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Archivo:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; }
+  body {
+    background:#dfe3e8; color:#14161a; font-family:"Archivo", system-ui, sans-serif;
+    display:flex; align-items:center; justify-content:center; padding:12px; touch-action:manipulation; user-select:none;
+    background-image:linear-gradient(rgba(20,22,26,.07) 1px, transparent 1px), linear-gradient(90deg, rgba(20,22,26,.07) 1px, transparent 1px);
+    background-size:32px 32px;
+  }
+  .stage { display:flex; flex-direction:column; gap:12px; align-items:flex-start; }
+  .head { display:flex; justify-content:space-between; align-items:baseline; width:100%; gap:16px; }
+  h1 { margin:0; font-family:"Archivo Black", sans-serif; font-weight:400; font-size:1.5rem; letter-spacing:-.02em; }
+  .hint { font-size:.9rem; font-weight:500; }
+  .controls { display:flex; gap:10px; width:100%; flex-wrap:wrap; align-items:center; }
+  .seg { display:flex; border:3px solid #14161a; box-shadow:4px 4px 0 #14161a; background:#f4f5f7; }
+  .seg button, .snd { font:700 .85rem Archivo, sans-serif; padding:6px 12px; border:0; background:transparent; cursor:pointer; color:#14161a; }
+  .seg button + button { border-left:3px solid #14161a; }
+  .seg button[aria-pressed="true"] { background:#14161a; color:#f4f5f7; }
+  .snd { border:3px solid #14161a; box-shadow:4px 4px 0 #14161a; background:#f4f5f7; margin-left:auto; }
+  .snd[aria-pressed="false"] { background:#dfe3e8; color:#6b7078; text-decoration:line-through; }
+  .controls button:focus-visible { outline:3px solid #ff3d81; outline-offset:2px; }
+  canvas { display:block; width:min(92vw, calc((100vh - 90px) * 0.625), 420px); aspect-ratio:400/640; background:#f4f5f7; border:3px solid #14161a; box-shadow:8px 8px 0 #14161a; cursor:pointer; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="head"><h1>Tall Order</h1><span class="hint">Tap, click or press Space to drop</span></div>
+    <canvas id="c" width="400" height="640" aria-label="Tall Order stacking game"></canvas>
+    <div class="controls">
+      <div class="seg" role="group" aria-label="Difficulty">
+        <button type="button" data-mode="easy">Easy</button>
+        <button type="button" data-mode="normal">Normal</button>
+        <button type="button" data-mode="hard">Hard</button>
+      </div>
+      <button type="button" class="snd" id="snd" aria-pressed="true">Sound on</button>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const W = 400, H = 640, BH = 28, GROUND = 92;
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = W * dpr; canvas.height = H * dpr; ctx.scale(dpr, dpr);
+
+  // startW: first block width. base/ramp/cap: slide speed in px/s. tol: how close counts as perfect. grow: width regained after 3 perfects.
+  const DIFF = {
+    easy:   { label:"Easy",   startW:250, base:150, ramp:6,  cap:340, tol:8, grow:12 },
+    normal: { label:"Normal", startW:210, base:200, ramp:9,  cap:500, tol:5, grow:8 },
+    hard:   { label:"Hard",   startW:130, base:260, ramp:12, cap:640, tol:4, grow:4 },
+  };
+  let mode = "normal", muted = false;
+  const bests = { easy:0, normal:0, hard:0 };
+  try {
+    mode = DIFF[localStorage.getItem("tallorder-mode")] ? localStorage.getItem("tallorder-mode") : "normal";
+    muted = localStorage.getItem("tallorder-muted") === "1";
+    for (const k in bests) bests[k] = +localStorage.getItem("tallorder-best-" + k) || 0;
+    if (!bests.normal) bests.normal = +localStorage.getItem("tallorder-best") || 0;
+  } catch (e) {}
+  let cfg = DIFF[mode];
+
+  // ---------- Sound (Web Audio, no files needed) ----------
+  let ac = null;
+  function audio() {
+    if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+    if (ac && ac.state === "suspended") ac.resume();
+    return ac;
+  }
+  function tone(freq, dur, type = "sine", vol = .18, slideTo = null, delay = 0) {
+    if (muted) return;
+    const a = audio(); if (!a) return;
+    const t = a.currentTime + delay, o = a.createOscillator(), gn = a.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+    gn.gain.setValueAtTime(vol, t); gn.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    o.connect(gn); gn.connect(a.destination); o.start(t); o.stop(t + dur + .02);
+  }
+  const SCALE = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24];            // major pentatonic steps
+  const note = step => 440 * Math.pow(2, (SCALE[Math.min(step, SCALE.length - 1)] - 5) / 12);
+  const sfx = {
+    place:  () => tone(150, .12, "triangle", .3, 70),
+    perfect:c => { tone(note(c), .22, "sine", .22); tone(note(c) * 2, .3, "sine", .1, null, .04); },
+    cut:    () => { tone(180, .18, "sawtooth", .12, 60); },
+    over:   () => { tone(330, .18, "square", .1, 250); tone(247, .2, "square", .1, 180, .16); tone(165, .5, "square", .1, 90, .34); },
+    start:  () => { tone(392, .1, "triangle", .2); tone(523, .14, "triangle", .2, null, .08); },
+  };
+
+  function setMode(m) {
+    mode = m; cfg = DIFF[m];
+    try { localStorage.setItem("tallorder-mode", m); } catch (e) {}
+    document.querySelectorAll(".seg button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.mode === m)));
+    if (state !== "play") reset();
+  }
+  function setMuted(v) {
+    muted = v;
+    try { localStorage.setItem("tallorder-muted", v ? "1" : "0"); } catch (e) {}
+    const s = document.getElementById("snd");
+    s.textContent = v ? "Sound off" : "Sound on"; s.setAttribute("aria-pressed", String(!v));
+  }
+
+  let state = "menu", g;
+  const hueOf = i => (205 + i * 13) % 360;
+  const col = (i, l = 55) => `hsl(${hueOf(i)} 78% ${l}%)`;
+
+  function reset() {
+    g = {
+      blocks: [{ x:(W - cfg.startW) / 2, w:cfg.startW }],
+      cur: null, pieces: [], rings: [], cam: 0, combo: 0, perfects: 0, t: 0, endT: 0, msg: "", msgT: 0,
+    };
+    spawn();
+  }
+  function spawn() {
+    const n = g.blocks.length, prev = g.blocks[n - 1];
+    const fromLeft = n % 2 === 0;
+    g.cur = { x: fromLeft ? 0 : W - prev.w, w: prev.w, dir: fromLeft ? 1 : -1 };
+  }
+  reset();
+
+  function drop() {
+    if (state === "menu") { state = "play"; reset(); sfx.start(); return; }
+    if (state === "over") { if (g.endT > .5) { state = "play"; reset(); sfx.start(); } return; }
+    const prev = g.blocks[g.blocks.length - 1], c = g.cur, n = g.blocks.length;
+    const left = Math.max(c.x, prev.x), right = Math.min(c.x + c.w, prev.x + prev.w), ow = right - left;
+    if (ow <= 0) {
+      g.pieces.push({ x:c.x, w:c.w, idx:n, vy:0, y:0, vx:0 });
+      g.cur = null; state = "over"; g.endT = 0;
+      const score = g.blocks.length - 1;
+      if (score > bests[mode]) { bests[mode] = score; try { localStorage.setItem("tallorder-best-" + mode, String(score)); } catch (e) {} }
+      sfx.over();
+      return;
+    }
+    let nx = c.x, nw = c.w;
+    if (Math.abs(c.x - prev.x) < cfg.tol) {
+      nx = prev.x; nw = prev.w; g.combo++; g.perfects++;
+      g.rings.push({ x:nx, w:nw, idx:n, t:0 });
+      g.msg = g.combo > 1 ? "PERFECT x" + g.combo : "PERFECT"; g.msgT = .8;
+      sfx.perfect(g.combo - 1);
+      if (g.combo >= 3 && nw < cfg.startW) { const grow = Math.min(cfg.grow, cfg.startW - nw); nw += grow; nx = Math.max(0, Math.min(W - nw, nx - grow / 2)); }
+    } else {
+      g.combo = 0;
+      sfx.cut();
+      nx = left; nw = ow;
+      if (c.x < prev.x) g.pieces.push({ x:c.x, w:prev.x - c.x, idx:n, vy:0, y:0, vx:-30 });
+      else g.pieces.push({ x:right, w:c.x + c.w - right, idx:n, vy:0, y:0, vx:30 });
+    }
+    g.blocks.push({ x:nx, w:nw });
+    if (g.combo === 0) sfx.place();
+    spawn();
+  }
+
+  window.addEventListener("keydown", e => {
+    if (e.target.closest && e.target.closest("button")) return;
+    if (e.code === "Space" || e.key === "Enter") { e.preventDefault(); if (!e.repeat) drop(); }
+  });
+  canvas.addEventListener("pointerdown", e => { e.preventDefault(); audio(); drop(); });
+  document.querySelectorAll(".seg button").forEach(b => b.addEventListener("click", () => { setMode(b.dataset.mode); b.blur(); }));
+  document.getElementById("snd").addEventListener("click", e => { setMuted(!muted); if (!muted) { audio(); sfx.start(); } e.currentTarget.blur(); });
+
+  // y of the top edge of block idx on screen
+  const sy = idx => H - GROUND - (idx + 1) * BH + g.cam;
+
+  function update(dt) {
+    g.t += dt;
+    const n = g.blocks.length;
+    const target = Math.max(0, (n - 8)) * BH;
+    g.cam += (target - g.cam) * Math.min(1, dt * 5);
+    if (g.cur) {
+      const c = g.cur, speed = Math.min(cfg.cap, cfg.base + (n - 1) * cfg.ramp);
+      c.x += c.dir * speed * dt;
+      if (c.x < 0) { c.x = 0; c.dir = 1; }
+      if (c.x + c.w > W) { c.x = W - c.w; c.dir = -1; }
+    }
+    g.pieces.forEach(p => { p.vy += 1500 * dt; p.y += p.vy * dt; p.x += p.vx * dt; });
+    g.pieces = g.pieces.filter(p => p.y < H + 200);
+    g.rings.forEach(r => r.t += dt); g.rings = g.rings.filter(r => r.t < .5);
+    g.msgT = Math.max(0, g.msgT - dt);
+    if (state === "over") g.endT += dt;
+  }
+
+  function block(x, idx, w, i) {
+    const y = sy(idx);
+    ctx.fillStyle = col(i); ctx.fillRect(x, y, w, BH);
+    ctx.fillStyle = col(i, 40); ctx.fillRect(x, y + BH - 5, w, 5);
+    ctx.fillStyle = "rgba(255,255,255,.28)"; ctx.fillRect(x, y, w, 3);
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#f4f5f7"; ctx.fillRect(0, 0, W, H);
+
+    // faint grid that scrolls with the tower
+    ctx.strokeStyle = "rgba(20,22,26,.06)"; ctx.lineWidth = 1;
+    const off = g.cam % BH;
+    for (let y = off; y < H; y += BH) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+    // big score numeral
+    const score = g.blocks.length - 1;
+    ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+    ctx.font = "230px 'Archivo Black', Impact, sans-serif";
+    ctx.fillStyle = "rgba(20,22,26,.09)";
+    ctx.fillText(String(score), W / 2, 300);
+
+    // ground
+    ctx.fillStyle = "#14161a"; ctx.fillRect(0, sy(-1), W, H);
+
+    g.blocks.forEach((b, i) => block(b.x, i, b.w, i));
+    if (g.cur) block(g.cur.x, g.blocks.length, g.cur.w, g.blocks.length);
+    g.pieces.forEach(p => { const y = sy(p.idx) + p.y; ctx.globalAlpha = .9; ctx.fillStyle = col(p.idx); ctx.fillRect(p.x, y, p.w, BH); ctx.globalAlpha = 1; });
+    g.rings.forEach(r => {
+      const k = r.t / .5, pad = 4 + k * 22;
+      ctx.strokeStyle = `rgba(20,22,26,${1 - k})`; ctx.lineWidth = 3;
+      ctx.strokeRect(r.x - pad, sy(r.idx) - pad, r.w + pad * 2, BH + pad * 2);
+    });
+
+    if (g.msgT > 0 && state === "play") {
+      ctx.font = "22px 'Archivo Black', Impact, sans-serif"; ctx.fillStyle = `rgba(20,22,26,${Math.min(1, g.msgT * 2)})`;
+      ctx.fillText(g.msg, W / 2, 56);
+    }
+
+    if (state === "menu") overlay("TALL ORDER", "Drop each block on the last one.\nWhatever hangs over is cut off.\nLine it up exactly to keep your width.", "Tap to start", bests[mode]);
+    if (state === "over") overlay("TOPPLED", "Height  " + score + "   (" + cfg.label + ")", g.endT > .5 ? "Tap to try again" : "", bests[mode], true);
+  }
+
+  function overlay(title, body, cta, bestScore, isOver) {
+    ctx.fillStyle = "rgba(244,245,247,.9)"; ctx.fillRect(0, 150, W, 300);
+    ctx.fillStyle = "#14161a"; ctx.fillRect(0, 150, W, 4); ctx.fillRect(0, 446, W, 4);
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    ctx.font = "46px 'Archivo Black', Impact, sans-serif"; ctx.fillStyle = "#14161a"; ctx.fillText(title, 28, 218);
+    ctx.font = "500 17px Archivo, sans-serif";
+    body.split("\n").forEach((l, i) => ctx.fillText(l, 28, 256 + i * 25));
+    ctx.font = "15px 'Archivo Black', Impact, sans-serif"; ctx.fillText("Best (" + cfg.label + ")  " + bestScore, 28, 372);
+    if (cta) { ctx.fillStyle = "#14161a"; ctx.fillRect(28, 392, 190, 38); ctx.fillStyle = "#f4f5f7"; ctx.font = "15px 'Archivo Black', Impact, sans-serif"; ctx.fillText(cta, 42, 416); }
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(.05, (now - last) / 1000); last = now;
+    if (state !== "menu") update(dt); else { g.t += dt; if (g.cur) { const c = g.cur; c.x += c.dir * 120 * dt; if (c.x < 0) { c.x = 0; c.dir = 1; } if (c.x + c.w > W) { c.x = W - c.w; c.dir = -1; } } }
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
